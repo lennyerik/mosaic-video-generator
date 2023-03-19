@@ -20,6 +20,9 @@ Example
 
 ## On the topic of performance
 The code is already pretty fast.
+I tested with 16 20s 1440p 60fps clips, which took 40s to tile, so about 0.5x realtime.
+That amounts to a normalised speed of 8x realtime per clip, or a decoding performance of at least 480 frames per second (due to the reencoding overhead).
+
 Although I would like even more speed, I doubt this is possible without rewriting the whole thing in C++.
 It's definitely not worth the effort for maybe like 1% more performance.
 
