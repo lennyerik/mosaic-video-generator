@@ -73,10 +73,6 @@ for f in listdir(args.VIDEO_FILES):
         assert iw == decoder.Width() and ih == decoder.Height() and ifmt == decoder.Format(
         ) and irate == decoder.Framerate(), 'All mosaic files must have the same width, height, pixel format and frame rate'
 
-        from os import getenv
-        if getenv('DEBUG', False):
-            break
-
 if len(decoders) == 0:
     print(f'No files found in {args.VIDEO_FILES}. Not rendering mosaic')
     exit(0)
@@ -94,7 +90,7 @@ mosaics_per_dimension = ceil(sqrt(len(decoders)))
 mosaic_width = args.output_width // mosaics_per_dimension
 mosaic_height = args.output_height // mosaics_per_dimension
 
-# Create the rgb converter and Remappers
+# Create the rgb and yuv converter and the resizer
 to_rgb = nvc.PySurfaceConverter(
     mosaic_width, mosaic_height, nvc.PixelFormat.NV12, nvc.PixelFormat.RGB, args.gpu_id
 )
