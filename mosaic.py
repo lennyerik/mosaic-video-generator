@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 
-from fractions import Fraction
 from os import listdir, path
 from math import sqrt, ceil
+from time import time
+from fractions import Fraction
 import PyNvCodec as nvc
 from pycuda.gpuarray import GPUArray
 import pycuda
@@ -35,10 +36,10 @@ parser = argparse.ArgumentParser(
               desc in nvc.GetNvencParams().items()]),
     formatter_class=argparse.RawTextHelpFormatter)
 parser.add_argument('-ow', '--output-width', type=int, metavar='WIDTH',
-                    help='Width of the generated video. Defaults to the width of the input files')
+                    help='Width of the generated video. Defaults to the width of the first input file')
 parser.add_argument('-oh', '--output-height', type=int, metavar='HEIGHT',
-                    help='Height of the generated video. Defaults to the height of the input files')
-parser.add_argument('-o', '--output', default='mosaic.mp4', metavar='filename',
+                    help='Height of the generated video. Defaults to the height of the first input file')
+parser.add_argument('-o', '--output', default='mosaic.mp4', metavar='FILENAME',
                     help='output filename')
 parser.add_argument('-f', '--force', action='store_true',
                     help='Force override the output file')
@@ -46,7 +47,7 @@ parser.add_argument('-q', '--quiet', action='store_true',
                     help='Only display error messages')
 parser.add_argument('-g', '--gpu-id', default=0, type=int,
                     help='GPU id to use for transcoding')
-parser.add_argument('-ea', '--encoder-arg', action=DictArgumentAction, metavar='args', nargs='+',
+parser.add_argument('-ea', '--encoder-arg', action=DictArgumentAction, metavar='ARGS', nargs='+',
                     default={'preset': 'P4', 'codec': 'h264'}, help='Pass arguments on to the nvidia encoder, e.g. -ea preset=P4 codec=h264')
 parser.add_argument(
     'VIDEO_FILES', help='The folder containing the video files to mosaic')
@@ -55,7 +56,7 @@ args = parser.parse_args()
 # Create the decoders
 decoders = []
 mappers = []
-iw, ih, ifmt, irate = None, None, None, None
+ifmt, ifps = None, None
 for f in listdir(args.VIDEO_FILES):
     full_path = path.join(args.VIDEO_FILES, f)
     if path.isfile(full_path):
@@ -65,25 +66,22 @@ for f in listdir(args.VIDEO_FILES):
         decoder = nvc.PyNvDecoder(full_path, args.gpu_id)
         decoders.append(decoder)
 
-        if iw is None and ih is None and ifmt is None and irate is None:
-            iw, ih = decoder.Width(), decoder.Height()
-            ifmt = decoder.Format()
-            irate = decoder.Framerate()
+        # Set the output width height and fps to the input's if they're not specified
+        if args.output_width is None:
+            args.output_width = decoder.Width()
+        if args.output_height is None:
+            args.output_height = decoder.Height()
 
-        assert iw == decoder.Width() and ih == decoder.Height() and ifmt == decoder.Format(
-        ) and irate == decoder.Framerate(), 'All mosaic files must have the same width, height, pixel format and frame rate'
+        if ifmt is None and ifps is None:
+            ifmt = decoder.Format()
+            ifps = decoder.Framerate()
+
+        assert ifmt == decoder.Format() and ifps == decoder.Framerate(
+        ), 'All mosaic files must have the same pixel format and frame rate'
 
 if len(decoders) == 0:
     print(f'No files found in {args.VIDEO_FILES}. Not rendering mosaic')
     exit(0)
-
-# Set the output width to the input width if it's not specified
-if not args.output_width:
-    args.output_width = iw
-    args.output_height = ih
-
-assert args.output_width / args.output_height == iw / \
-    ih, 'The aspect ratio of input and output must be the same'
 
 # Calculate the grid sizes for the mosaic
 mosaics_per_dimension = ceil(sqrt(len(decoders)))
@@ -110,33 +108,20 @@ if not args.force and path.isfile(args.output):
     if not input(f'Outfile {args.output} already exists. Overwrite? [y/N] ').lower().startswith('y'):
         exit(0)
 output_file = av.open(args.output, 'w')
-output_stream = output_file.add_stream('h264', rate=irate)
+output_stream = output_file.add_stream('h264', rate=ifps)
 output_stream.width = args.output_width
 output_stream.height = args.output_height
 
-# TODO: This is a cheeky hack
-if args.quiet:
-    def tqdm(x): return x
 
-global frame_counter
-frame_counter = 0
-
-
-def write_packet(data):
-    global frame_counter
-
+def write_packet(idx, data):
     packet = av.packet.Packet(bytes(data))
-    packet.dts = packet.pts = frame_counter * 1000
-    packet.time_base = Fraction(1, int(irate * 1000))
+    packet.dts = packet.pts = idx * 1000
+    packet.time_base = Fraction(1, int(ifps * 1000))
     packet.stream = output_stream
     output_file.mux(packet)
 
-    frame_counter += 1
 
-
-# Main loop
-frames = []
-for frame in tqdm(range(min(map(lambda x: x.Numframes(), decoders)))):
+def encode_single_frame(frame_idx):
     frame_surf = nvc.Surface.Make(
         nvc.PixelFormat.RGB, args.output_width, args.output_height, args.gpu_id)
     frame_plane = frame_surf.PlanePtr()
@@ -166,9 +151,26 @@ for frame in tqdm(range(min(map(lambda x: x.Numframes(), decoders)))):
 
     encoded = np.empty([], dtype=np.uint8)
     if encoder.EncodeSingleSurface(frame_surf, encoded, sync=False):
-        write_packet(encoded)
+        write_packet(frame_idx, encoded)
+
+
+# Main loop
+frames = []
+start = time()
+
+frame_iter = range(min(map(lambda x: x.Numframes(), decoders)))
+if not args.quiet:
+    frame_iter = tqdm(frame_iter)
+
+frame_idx = 0
+for frame_idx in frame_iter:
+    encode_single_frame(frame_idx)
 
 # Flush the encoder queue
 encoded = np.empty([], dtype=np.uint8)
 while encoder.FlushSinglePacket(encoded):
-    write_packet(encoded)
+    frame_idx += 1
+    write_packet(frame_idx, encoded)
+
+if not args.quiet:
+    print(f'Finished generating in {time() - start:.3f} seconds')

@@ -14,9 +14,13 @@ Look at the help:
 
     ./mosaic.py -h
 
-Example
+Example:
 
-    ./mosaic.py -o myvideo.mp4 somefolder/with/videos/
+    ./mosaic.py -o myvideo.mp4 some/folder/with/videos/
+
+If you want insane quality:
+
+    ./mosaic.py -o myvideo.mp4 -ow 3840 -oh 2160 some/folder/with/videos/ -ea preset=P6 bitrate=70M profile=high
 
 ## On the topic of performance
 The code is already pretty fast.
