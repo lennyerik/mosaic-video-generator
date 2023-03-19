@@ -39,6 +39,8 @@ parser.add_argument('-ow', '--output-width', type=int, metavar='WIDTH',
                     help='Width of the generated video. Defaults to the width of the first input file')
 parser.add_argument('-oh', '--output-height', type=int, metavar='HEIGHT',
                     help='Height of the generated video. Defaults to the height of the first input file')
+parser.add_argument('--enable-non-divisable', action='store_true',
+                    help='Enable resolutions which do not divide by the mosaic sizes evenly. This will cut off some pixels at the edges.')
 parser.add_argument('-o', '--output', default='mosaic.mp4', metavar='FILENAME',
                     help='output filename')
 parser.add_argument('-f', '--force', action='store_true',
@@ -48,7 +50,7 @@ parser.add_argument('-q', '--quiet', action='store_true',
 parser.add_argument('-g', '--gpu-id', default=0, type=int,
                     help='GPU id to use for transcoding')
 parser.add_argument('-ea', '--encoder-arg', action=DictArgumentAction, metavar='ARGS', nargs='+',
-                    default={'preset': 'P4', 'codec': 'h264'}, help='Pass arguments on to the nvidia encoder, e.g. -ea preset=P4 codec=h264')
+                    default={'preset': 'P4', 'codec': 'h264', 'gop': '30'}, help='Pass arguments on to the nvidia encoder, e.g. -ea preset=P4 codec=h264')
 parser.add_argument(
     'VIDEO_FILES', help='The folder containing the video files to mosaic')
 args = parser.parse_args()
@@ -85,8 +87,18 @@ if len(decoders) == 0:
 
 # Calculate the grid sizes for the mosaic
 mosaics_per_dimension = ceil(sqrt(len(decoders)))
-mosaic_width = args.output_width // mosaics_per_dimension
-mosaic_height = args.output_height // mosaics_per_dimension
+mosaic_width = args.output_width / mosaics_per_dimension
+mosaic_height = args.output_height / mosaics_per_dimension
+if mosaic_width != int(mosaic_width) or mosaic_height != int(mosaic_height):
+    if args.enable_non_divisable:
+        mosaic_width = ceil(mosaic_width)
+        mosaic_height = ceil(mosaic_height)
+    else:
+        print(f'Output dimensions {args.output_width}x{args.output_height} are not evenly divisable '
+              f'by {mosaics_per_dimension} rows and columns!')
+        print('Rerun with --enable-non-divisable to generate the video anyway.')
+        print('Be aware that this will cut off some amount of pixels at the edges of certain clips.')
+        exit(1)
 
 # Create the rgb and yuv converter and the resizer
 to_rgb = nvc.PySurfaceConverter(
@@ -102,15 +114,18 @@ mosaic_resizer = nvc.PySurfaceResizer(
 
 # Create the encoder and output file
 encoder = nvc.PyNvEncoder(args.encoder_arg | {
-                          's': f'{args.output_width}x{args.output_height}'}, args.gpu_id, nvc.PixelFormat.YUV444)
+    's': f'{args.output_width}x{args.output_height}'}, args.gpu_id, nvc.PixelFormat.YUV444)
 
 if not args.force and path.isfile(args.output):
     if not input(f'Outfile {args.output} already exists. Overwrite? [y/N] ').lower().startswith('y'):
         exit(0)
 output_file = av.open(args.output, 'w')
-output_stream = output_file.add_stream('h264', rate=ifps)
+output_stream = output_file.add_stream(args.encoder_arg['codec'], rate=ifps)
 output_stream.width = args.output_width
 output_stream.height = args.output_height
+output_stream.pix_fmt = 'yuv444p'
+output_stream.time_base = Fraction(1, int(ifps * 1000))
+output_stream.gop_size = int(args.encoder_arg['gop'])
 
 
 def write_packet(idx, data):
@@ -129,6 +144,8 @@ def encode_single_frame(frame_idx):
                          dtype=np.uint8, gpudata=frame_plane.GpuMem())
     frame_buf.strides = (frame_plane.Pitch(), 3, 1)
 
+    encoded_packet = np.empty([], dtype=np.uint8)
+
     for i, decoder in enumerate(decoders):
         surf = decoder.DecodeSingleSurface()
 
@@ -142,6 +159,16 @@ def encode_single_frame(frame_idx):
 
         row = i // mosaics_per_dimension
         col = i % mosaics_per_dimension
+
+        # Cut off overlapping edge pixels
+        if args.enable_non_divisable:
+            if row == (mosaics_per_dimension - 1):
+                surf_buf = surf_buf[mosaics_per_dimension *
+                                    mosaic_height-args.output_height:]
+            if col == (mosaics_per_dimension - 1):
+                surf_buf = surf_buf[:, mosaics_per_dimension *
+                                    mosaic_width-args.output_width:]
+
         # This should happen entirely on the GPU and be lightning fast
         frame_buf[row*mosaic_height:row*mosaic_height+mosaic_height,
                   col*mosaic_width:col*mosaic_width+mosaic_width] = surf_buf
@@ -149,9 +176,8 @@ def encode_single_frame(frame_idx):
     # Go back to YUV for compression
     frame_surf = to_yuv.Execute(frame_surf, colour_space)
 
-    encoded = np.empty([], dtype=np.uint8)
-    if encoder.EncodeSingleSurface(frame_surf, encoded, sync=False):
-        write_packet(frame_idx, encoded)
+    if encoder.EncodeSingleSurface(frame_surf, encoded_packet, sync=False):
+        write_packet(frame_idx, encoded_packet)
 
 
 # Main loop
@@ -167,10 +193,10 @@ for frame_idx in frame_iter:
     encode_single_frame(frame_idx)
 
 # Flush the encoder queue
-encoded = np.empty([], dtype=np.uint8)
-while encoder.FlushSinglePacket(encoded):
+encoded_packet = np.empty([], dtype=np.uint8)
+while encoder.FlushSinglePacket(encoded_packet):
     frame_idx += 1
-    write_packet(frame_idx, encoded)
+    write_packet(frame_idx, encoded_packet)
 
 if not args.quiet:
     print(f'Finished generating in {time() - start:.3f} seconds')
