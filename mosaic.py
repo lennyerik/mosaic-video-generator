@@ -93,6 +93,10 @@ if mosaic_width != int(mosaic_width) or mosaic_height != int(mosaic_height):
     if args.enable_non_divisable:
         mosaic_width = ceil(mosaic_width)
         mosaic_height = ceil(mosaic_height)
+
+        # If these are not divisable by 2, we get ugly edges around clips
+        mosaic_width += mosaic_width % 2
+        mosaic_height += mosaic_height % 2
     else:
         print(f'Output dimensions {args.output_width}x{args.output_height} are not evenly divisable '
               f'by {mosaics_per_dimension} rows and columns!')
