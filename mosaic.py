@@ -99,6 +99,9 @@ if mosaic_width != int(mosaic_width) or mosaic_height != int(mosaic_height):
         print('Rerun with --enable-non-divisable to generate the video anyway.')
         print('Be aware that this will cut off some amount of pixels at the edges of certain clips.')
         exit(1)
+else:
+    mosaic_width = int(mosaic_width)
+    mosaic_height = int(mosaic_height)
 
 # Create the rgb and yuv converter and the resizer
 to_rgb = nvc.PySurfaceConverter(
